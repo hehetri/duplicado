@@ -7,8 +7,8 @@ Estratégia padrão (`safe-hybrid`):
 3) Anexa itens novos do BOUT apenas se forem "compatíveis" com TBOT
    (por padrão: `icon_id` já existente no TBOT).
 
-Isso atende dois objetivos ao mesmo tempo:
-- evitar crash por dados completamente estranhos ao cliente TBOT;
+PROTECTED_TBOT_FIELDS = {"id", "id_hex", "level", "currency", "icon_id"}
+COPYABLE_FIELDS = {"name", "price", "stats"}
 - migrar itens novos de fato (não só sobreposição).
 """
 
@@ -159,7 +159,7 @@ def main() -> None:
         "--mode",
         choices=["safe-hybrid", "safe-overlap", "append-all"],
         default="safe-hybrid",
-        help="safe-hybrid (padrão) = overlap + append compatível; safe-overlap = sem append; append-all = append completo",
+        default=["name", "price", "stats"],
     )
     parser.add_argument(
         "--copy-fields",
