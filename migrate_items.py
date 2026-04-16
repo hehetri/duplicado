@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
-"""Migração de itens BOUT -> TBOT com foco em compatibilidade em runtime.
+"""Migração BOUT -> TBOT com foco em adicionar NOVOS IDs.
 
-Estratégia padrão (`safe-hybrid`):
-1) Mantém base TBOT (ordem + campos protegidos).
-2) Atualiza apenas `price`/`stats` por interseção de ID.
-3) Anexa itens novos do BOUT apenas se forem "compatíveis" com TBOT
-   (por padrão: `icon_id` já existente no TBOT).
-
-PROTECTED_TBOT_FIELDS = {"id", "id_hex", "level", "currency", "icon_id"}
-COPYABLE_FIELDS = {"name", "price", "stats"}
+Padrão (`new-ids-only`):
+- Mantém todos os itens já existentes no TBOT sem alteração.
+- Adiciona apenas itens do BOUT cujo `id` não existe no TBOT.
+- Se `icon_id` do item novo não existir no TBOT, remapeia para ícone fallback seguro.
+PROTECTED_TBOT_FIELDS = {"id", "id_hex", "name", "level", "currency", "price", "icon_id", "stats"}
 - migrar itens novos de fato (não só sobreposição).
 """
 
@@ -61,93 +58,65 @@ def validate_items(items: list[dict[str, Any]], label: str) -> None:
 
 def overlay_by_intersection(
     base_tbot: list[dict[str, Any]],
-    source_bout: list[dict[str, Any]],
-    copy_fields: set[str],
-) -> tuple[list[dict[str, Any]], int]:
-    if not copy_fields.issubset(COPYABLE_FIELDS):
-        invalid = sorted(copy_fields - COPYABLE_FIELDS)
-        raise ValueError(f"Campos não permitidos para cópia: {invalid}")
-
-    bout_by_id = {item["id"]: item for item in source_bout}
-    merged = []
-    changed = 0
-
-    for item in base_tbot:
-        result = deepcopy(item)
-        other = bout_by_id.get(item["id"])
-        if other is not None:
-            before = json.dumps(result, sort_keys=True, ensure_ascii=False)
-            for field in copy_fields:
-                result[field] = deepcopy(other[field])
-            after = json.dumps(result, sort_keys=True, ensure_ascii=False)
-            if before != after:
-                changed += 1
-        merged.append(result)
-
-    return merged, changed
-
-
-def append_compatible_missing(
-    merged_from_tbot: list[dict[str, Any]],
-    source_bout: list[dict[str, Any]],
-    *,
-    allow_new_icons: bool,
-) -> tuple[list[dict[str, Any]], int, int]:
-    existing_ids = {item["id"] for item in merged_from_tbot}
-    known_icons = {item["icon_id"] for item in merged_from_tbot}
-
-    appended = []
-    skipped = 0
-    for item in source_bout:
-        if item["id"] in existing_ids:
-            continue
-        if (not allow_new_icons) and (item["icon_id"] not in known_icons):
-            skipped += 1
-            continue
-        appended.append(deepcopy(item))
-        existing_ids.add(item["id"])
-
-    return [*merged_from_tbot, *appended], len(appended), skipped
-
-
-def migrate_safe_hybrid(
-    base_tbot: list[dict[str, Any]],
-    source_bout: list[dict[str, Any]],
-    *,
-    copy_fields: set[str],
-    allow_new_icons: bool,
-) -> tuple[list[dict[str, Any]], dict[str, int]]:
-    overlapped, updated_records = overlay_by_intersection(base_tbot, source_bout, copy_fields)
-    merged, appended_from_bout, skipped_incompatible = append_compatible_missing(
-        overlapped,
-        source_bout,
-        allow_new_icons=allow_new_icons,
+    return Counter(x["icon_id"] for x in items).most_common(1)[0][0]
+def append_new_ids(
+    base: list[dict[str, Any]],
+    existing_ids = {x["id"] for x in base}
+    known_icons = {x["icon_id"] for x in base}
+    appended: list[dict[str, Any]] = []
+    remapped = 0
+            if icon_policy == "remap-unknown":
+                remapped += 1
+            elif icon_policy == "keep-unknown":
+                pass
+    return [*base, *appended], len(appended), skipped, remapped
+def check_tbot_prefix_unchanged(original_tbot: list[dict[str, Any]], merged: list[dict[str, Any]]) -> None:
+        raise RuntimeError("Falha: merge reduziu tamanho do TBOT")
+                raise RuntimeError(f"Falha: prefixo TBOT alterado no índice {idx}, chave {key}")
+    parser = argparse.ArgumentParser(description="Migra BOUT -> TBOT priorizando novos IDs")
+        choices=["new-ids-only", "safe-hybrid", "safe-overlap", "append-all"],
+        default="new-ids-only",
+        help="new-ids-only (padrão) não altera itens antigos; só adiciona IDs novos",
+        help="Campos copiados no modo safe-overlap/safe-hybrid",
+        help="Como tratar icon_id desconhecido para itens novos",
     )
-    stats = {
-        "tbot_total": len(base_tbot),
-        "bout_total": len(source_bout),
-        "overlap_ids": len({x['id'] for x in source_bout} & {x['id'] for x in base_tbot}),
-        "updated_records": updated_records,
-        "appended_from_bout": appended_from_bout,
-        "skipped_incompatible": skipped_incompatible,
-        "merged_total": len(merged),
-    }
-    return merged, stats
-
-
-def duplicate_id_count(items: list[dict[str, Any]]) -> int:
-    return sum(1 for _, c in Counter(x["id"] for x in items).items() if c > 1)
-
-
-def check_compatibility_guard(original_tbot: list[dict[str, Any]], merged: list[dict[str, Any]]) -> None:
-    if len(merged) < len(original_tbot):
-        raise RuntimeError("Falha de segurança: merge não pode reduzir registros do TBOT")
-    for idx, (old, new) in enumerate(zip(original_tbot, merged)):
-        for key in PROTECTED_TBOT_FIELDS:
-            if old[key] != new[key]:
-                raise RuntimeError(
-                    f"Falha de segurança: campo protegido alterado em índice {idx}, chave {key}"
-                )
+    parser.add_argument("--fallback-icon", type=int, default=None)
+    if args.mode == "new-ids-only":
+        merged, appended, skipped, remapped = append_new_ids(
+            deepcopy(tbot), bout, icon_policy=args.icon_policy, fallback_icon=fallback_icon
+        )
+        stats = {
+            "updated_records": 0,
+            "appended_from_bout": appended,
+            "skipped_incompatible": skipped,
+            "remapped_icons": remapped,
+        }
+    elif args.mode == "safe-overlap":
+    elif args.mode == "safe-hybrid":
+        merged, appended, skipped, remapped = append_new_ids(
+            base, bout, icon_policy=args.icon_policy, fallback_icon=fallback_icon
+    else:  # append-all
+        base, updated = overlay_by_intersection(tbot, bout, set(args.copy_fields))
+        merged, appended, skipped, remapped = append_new_ids(
+            base, bout, icon_policy="keep-unknown", fallback_icon=fallback_icon
+        stats = {
+            "updated_records": updated,
+            "appended_from_bout": appended,
+            "skipped_incompatible": skipped,
+            "remapped_icons": remapped,
+        }
+    check_tbot_prefix_unchanged(tbot, merged)
+    bout_ids = {x["id"] for x in bout}
+    merged_ids = {x["id"] for x in merged}
+    print(f"- tbot_total: {len(tbot)}")
+    print(f"- bout_total: {len(bout)}")
+    print(f"- overlap_ids: {len(bout_ids & {x['id'] for x in tbot})}")
+    print(f"- updated_records: {stats['updated_records']}")
+    print(f"- appended_from_bout: {stats['appended_from_bout']}")
+    print(f"- skipped_incompatible: {stats['skipped_incompatible']}")
+    print(f"- remapped_icons: {stats['remapped_icons']}")
+    print(f"- merged_total: {len(merged)}")
+    print(f"- bout_ids_missing_in_merged: {len(bout_ids - merged_ids)}")
 
 
 def main() -> None:
